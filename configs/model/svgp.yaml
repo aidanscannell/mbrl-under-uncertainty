@@ -19,12 +19,13 @@ covar_module:
   batch_shape:
     - ${output_dim}
 learning_rate: 0.1
+batch_size: 16
 trainer:
   _target_: pytorch_lightning.Trainer
-  logger:
-    _target_: pytorch_lightning.loggers.WandbLogger
-    project: ${wandb.project}
-    log_model: "all"
+  # logger:
+  #   _target_: pytorch_lightning.loggers.WandbLogger
+  #   project: ${wandb.project}
+  #   log_model: "all"
   callbacks:
     - _target_: pytorch_lightning.callbacks.EarlyStopping
       monitor: "train_loss"

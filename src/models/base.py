@@ -19,11 +19,11 @@ class DynamicModel:
     def __call__(self, state: State, action: Action) -> Prediction:
         return self.predict(state=state, action=action)
 
-    def predict(self, state: State, action: Action) -> Prediction:
+    def predict(self, state: State, action: Action, data_new: Optional=None) -> Prediction:
         x = torch.concat([state, action], -1)
         return self.forward(x)
 
-    def forward(self, x) -> Prediction:
+    def forward(self, x, data_new: Optional=None) -> Prediction:
         raise NotImplementedError
 
     def train(self, replay_buffer: ReplayBuffer, delta_state: bool = True):
