@@ -53,7 +53,7 @@ install_requires = [
     "gpytorch",
     # "torchrl",
     # f"dmc2gym@ file://{_here}/src/third_party/dmc2gym",
-    f"torchrl@ file://{_here}/src/third_party/rl-0.0.4b",
+    # f"torchrl@ file://{_here}/src/third_party/rl-0.0.4b",
     # f"torchrl@ file://{_here}/src/third_party/rl",
 ]
 extras_require = {
