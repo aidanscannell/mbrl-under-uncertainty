@@ -1,0 +1,11 @@
+# _target_: dm_control.suite.load
+# domain_name: "cartpole"
+# task_name: "swingup"
+# task_kwargs:
+#   random: ${random_seed}
+# visualize_reward: false
+
+_target_: torchrl.envs.libs.dm_control.DMControlEnv
+env_name: "cartpole"
+task_name: "swingup"
+# seed: ${random_seed}

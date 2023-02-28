@@ -1,0 +1,63 @@
+defaults:
+  # - model: laplace
+  - model: svgp
+  # - task: cartpole_swingup
+  - env: cartpole_swingup
+  # - model: probabilistic_ensemble
+  # Use slurm on cluster or local?
+  - override hydra/launcher: submitit_local
+  # - override hydra/launcher: local
+  # - override hydra/launcher: slurm
+  # Disable logging by Hydra
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+  - _self_
+
+# task: cartpole_swingup
+random_seed: 42
+name: "gp"
+device: "cpu"
+
+frame_stack: 1
+action_repeat: 1
+
+observation_dim: 4
+action_dim: 1
+# action_dim:
+#   _target_: ${env.action_spec().shape}
+input_dim: 5
+output_dim: ${observation_dim}
+batch_shape:
+  _target_: torch.Size
+  args:
+    - ${output_dim}
+
+num_episodes: 200
+max_steps_per_episode: 200
+save_video: true
+save_train_video: true
+
+training:
+  batch_size: 64
+  max_epochs: 1000
+  num_workers: 8
+
+initial_dataset:
+  num_episodes: 20
+  replay_buffer_capacity: 100000
+
+wandb:
+  entity: "aidanscannell"
+  project: "mbrl-under-uncertainty"
+  # log_artifacts: True
+  run_name: "${name}"
+  tags:
+    # - ${env.bsuite_id}
+    - "random_seed=${random_seed}"
+    - "name=${name}"
+
+hydra:
+  job:
+    chdir: False
+  run:
+    dir: ""

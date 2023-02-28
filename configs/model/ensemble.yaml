@@ -1,0 +1,20 @@
+_target_: src.models.ensemble.utils.build_ensemble_of_mlps
+in_size: ${input_dim}
+out_size: ${output_dim}
+ensemble_size: 2
+features:
+  - 10
+  - 10
+  - 10
+  - 10
+probabilistic: false
+activations:
+  - _target_: torch.nn.ReLU
+  - _target_: torch.nn.ReLU
+  - _target_: torch.nn.ReLU
+  - _target_: torch.nn.ReLU
+  # - _target_: src.models.activations.Sin
+learning_rate: 1e-3
+batch_size: 64
+shuffle: true
+num_workers: 8
