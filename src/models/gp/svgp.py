@@ -13,6 +13,12 @@ from src.custom_types import (
     ReplayBuffer_to_dynamics_TensorDataset,
     State,
 )
+from gpytorch.distributions import MultivariateNormal
+from gpytorch.lazy import (
+    DiagLazyTensor,
+    CholLazyTensor,
+    TriangularLazyTensor,
+)
 from src.models import DynamicModel
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -50,7 +56,7 @@ class SVGPDynamicModel(DynamicModel):
     def forward(self, x, data_new: Optional=None) -> Prediction:
         self.gp_module.eval()
         latent = self.gp_module.forward(x, data_new=data_new)
-        print("latent {}".format(latent))
+        print("latent {}".format(latent.variance))
 
         output = self.gp_module.likelihood(latent)
         print("output {}".format(output ))
@@ -60,6 +66,110 @@ class SVGPDynamicModel(DynamicModel):
         print("y_dist {}".format(y_dist))
         noise_var = output.variance - latent.variance
         # pred = Prediction(latent=f_dist, output=y_dist, noise_var=noise_var)
+        X = inputs
+        Y = targets
+
+        # make copy of self
+        fantasy_model = self.make_copy()
+        inducing_points = self.variational_strategy.inducing_points
+
+        # mean and cov from prediction strategy
+        #         var_dist = self.variational_strategy._variational_distribution
+        #         var_mean = var_dist.variational_mean.detach()
+        #         var_cov_root = var_dist.chol_variational_covar.detach()
+        var_cov_root = TriangularLazyTensor(
+            self.variational_strategy._variational_distribution.chol_variational_covar
+        )
+        var_cov = CholLazyTensor(var_cov_root)
+        var_mean = (
+            self.variational_strategy.variational_distribution.mean
+        )  # .unsqueeze(-1)
+        if var_mean.shape[-1] != 1:  # TODO: won't work for M=1 ...
+            var_mean = var_mean.unsqueeze(-1)
+
+        # var_dist = self.variational_strategy.variational_distribution
+        # var_mean = var_dist.mean
+        # var_cov = var_dist.lazy_covariance_matrix
+
+        # GPyTorch's way of computing Kuf:
+        # full_inputs = torch.cat([inducing_points, X], dim=-2)
+        full_inputs = torch.cat([torch.tile(inducing_points, X.shape[:-2] + (1, 1)), X], dim=-2)
+        full_covar = self.covar_module(full_inputs)
+
+        # Covariance terms
+        num_induc = inducing_points.size(-2)
+        induc_induc_covar = full_covar[..., :num_induc, :num_induc].add_jitter()
+        induc_data_covar = full_covar[..., :num_induc, num_induc:].evaluate()
+
+        K_uf = induc_data_covar
+
+        # Kuu = self.covar_module(inducing_points)
+        Kuu = induc_induc_covar
+        # Kuu_root = Kuu.cholesky()
+
+        lambda_1, lambda_2 = mean_cov_to_natural_param(var_mean, var_cov, Kuu)
+
+        lambda_1_t = torch.zeros_like(lambda_1)
+        lambda_2_t = torch.zeros_like(lambda_2)
+
+        # online_update
+        for _ in range(self.num_online_updates):
+            # grad_varexp_natural_params
+            with torch.no_grad():
+                Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
+                #                 if Y.shape[-1] == 1:
+                #                     Xt.unsqueeze_(-1)
+                pred = fantasy_model(Xt)
+                mean = pred.mean
+                var = pred.variance
+            mean.requires_grad_()
+            var.requires_grad_()
+
+            # variational expectations
+            f_dist = MultivariateNormal(mean, DiagLazyTensor(var))
+            ve_terms = fantasy_model.likelihood.expected_log_prob(Y, f_dist)
+            ve = ve_terms.sum()  # TODO: CHECK: divide by num_data ? but only one point at a time so probably fine
+
+            ve.backward(inputs=[mean, var])
+            d_exp_dm = mean.grad  # [batch, N]
+            d_exp_dv = var.grad  # [batch, N]
+
+            eps = 1e-8
+            d_exp_dv.clamp_(max=-eps)
+
+            grad_nat_1 = (d_exp_dm - 2.0 * (d_exp_dv * mean))
+            grad_nat_2 = d_exp_dv
+
+            grad_mu_1 = K_uf.matmul(grad_nat_1[..., None])
+
+            grad_mu_2 = K_uf.matmul(DiagLazyTensor(grad_nat_2).matmul(K_uf.swapdims(-1, -2)))
+
+            lr = self.lr
+            scale = 1.0
+
+            lambda_1_t_new = (1.0 - lr) * lambda_1_t + lr * scale * grad_mu_1
+            lambda_2_t_new = (1.0 - lr) * lambda_2_t + lr * scale * (-2) * grad_mu_2
+
+            lambda_1_new = lambda_1 - lambda_1_t + lambda_1_t_new
+            lambda_2_new = lambda_2 - lambda_2_t + lambda_2_t_new
+
+            new_mean, new_cov = conditional_from_precision_sites_white_full(
+                Kuu, lambda_1_new, lambda_2_new,
+                jitter=getattr(self, "tsvgp_jitter", 0.0)
+            )
+            new_mean = new_mean.squeeze(-1)
+            new_cov_root = new_cov.cholesky()
+
+            fantasy_var_dist = fantasy_model.variational_strategy._variational_distribution
+            with torch.no_grad():
+                fantasy_var_dist.variational_mean.set_(new_mean)
+                fantasy_var_dist.chol_variational_covar.set_(new_cov_root)
+
+            lambda_1 = lambda_1_new
+            lambda_2 = lambda_2_new
+            lambda_1_t = lambda_1_t_new
+            lambda_2_t = lambda_2_t_new
+
         pred = Prediction(latent_dist=f_dist, output_dist=y_dist, noise_var=noise_var)
         return pred
 
@@ -88,6 +198,51 @@ class SVGPDynamicModel(DynamicModel):
         self.gp_module.gp.eval()
         self.gp_module.likelihood.eval()
 
+
+def mean_cov_to_natural_param(mu, Su, K_uu):
+    """
+    Transforms (m,S) to (λ₁,P) tsvgp_white parameterization
+    """
+    lamb1 = K_uu.matmul(Su.inv_matmul(mu))
+    lamb2 = K_uu.matmul(Su.inv_matmul(K_uu.evaluate())) - K_uu.evaluate()
+
+    return lamb1, lamb2
+
+
+def conditional_from_precision_sites_white_full(
+        Kuu,
+        lambda1,
+        Lambda2,
+        jitter=1e-9,
+):
+    """
+    Given a g₁ and g2, and distribution p and q such that
+      p(g₂) = N(g₂; 0, Kuu)
+      p(g₁) = N(g₁; 0, Kff)
+      p(g₁ | g₂) = N(g₁; Kfu (Kuu⁻¹) g₂, Kff - Kfu (Kuu⁻¹) Kuf)
+    And  q(g₂) = N(g₂; μ, Σ) such that
+        Σ⁻¹  = Kuu⁻¹  + Kuu⁻¹LLᵀKuu⁻¹
+        Σ⁻¹μ = Kuu⁻¹l
+    This method computes the mean and (co)variance of
+      q(g₁) = ∫ q(g₂) p(g₁ | g₂) dg₂ = N(g₂; μ*, Σ**)
+    with
+    Σ** = k** - kfu Kuu⁻¹ kuf - kfu Kuu⁻¹ Σ Kuu⁻¹ kuf
+        = k** - kfu Kuu⁻¹kuf + kfu (Kuu + LLᵀ)⁻¹ kuf
+    μ* = k*u Kuu⁻¹ m
+       = k*u Kuu⁻¹ Λ⁻¹ Kuu⁻¹ l
+       = k*u (Kuu + LLᵀ)⁻¹ l
+    Inputs:
+    :param Kuu: tensor M x M
+    :param l: tensor M x 1
+    :param L: tensor M x M
+    """
+    # TODO: rewrite this
+
+    R = (Lambda2 + Kuu).add_jitter(jitter)
+
+    mean = Kuu.matmul(R.inv_matmul(lambda1))
+    cov = Kuu.matmul(R.inv_matmul(Kuu.evaluate()))  # TODO: symmetrise?
+    return mean, cov
 
 class SVGPModule(pl.LightningModule):
     def __init__(

@@ -27,8 +27,8 @@ if __name__ == "__main__":
 
     @hydra.main(version_base="1.3", config_path="../configs", config_name="main")
     def train_gp_dynamic_model(cfg):
-        train_x = torch.linspace(-1,1,100*input_dim).reshape(-1,input_dim)
-        train_y = torch.linspace(1,3,100*output_dim).reshape(-1,output_dim)
+        train_x = torch.linspace(-1, 1, 100*input_dim).reshape(-1, input_dim)
+        train_y = torch.linspace(1, 3, 100*output_dim).reshape(-1, output_dim)
         print("X.shape {}".format(train_x.shape))
         print("Y.shape {}".format(train_y.shape))
         from torch.utils.data import TensorDataset, DataLoader
@@ -36,8 +36,8 @@ if __name__ == "__main__":
         # train_loader = DataLoader(train_dataset, batch_size=1024, shuffle=True)
         model = hydra.utils.instantiate(cfg.model)
 
-        Xnew = torch.linspace(2,3,100*input_dim).reshape(-1,input_dim)
-        Ynew = torch.linspace(3,4,100*output_dim).reshape(-1,output_dim)
+        Xnew = torch.linspace(2, 3, 100*input_dim).reshape(-1, input_dim)
+        Ynew = torch.linspace(3, 4, 100*output_dim).reshape(-1, output_dim)
 
         Xtest = torch.linspace(3, 4, input_dim).reshape(1, input_dim)
 
