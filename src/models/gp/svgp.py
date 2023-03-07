@@ -27,15 +27,15 @@ from torch.utils.data import DataLoader, TensorDataset
 class SVGPDynamicModel(DynamicModel):
     # TODO implement delta_state properly
     def __init__(
-        self,
-        likelihood: gpytorch.likelihoods.Likelihood = None,
-        mean_module: gpytorch.means.Mean = None,
-        covar_module: gpytorch.kernels.Kernel = None,
-        learning_rate: float = 0.1,
-        batch_size: int=16,
-        trainer: Optional[Trainer] = None,
-        delta_state: bool = True,
-        num_workers: int = 1,
+            self,
+            likelihood: gpytorch.likelihoods.Likelihood = None,
+            mean_module: gpytorch.means.Mean = None,
+            covar_module: gpytorch.kernels.Kernel = None,
+            learning_rate: float = 0.1,
+            batch_size: int = 16,
+            trainer: Optional[Trainer] = None,
+            delta_state: bool = True,
+            num_workers: int = 1,
     ):
         super(SVGPDynamicModel, self).__init__()
         self.gp_module = SVGPModule(
@@ -44,7 +44,7 @@ class SVGPDynamicModel(DynamicModel):
             covar_module=covar_module,
             learning_rate=learning_rate,
             out_size=covar_module.batch_shape[0],
-            # TODO is this the bset way to set out_size?
+            # TODO is this the bset way to set out_size? Not like this!
         )
         if trainer is None:
             self.trainer = Trainer()
@@ -54,16 +54,16 @@ class SVGPDynamicModel(DynamicModel):
         self.delta_state = delta_state
         self.num_workers = num_workers
 
-    def forward(self, x, data_new: Optional=None) -> Prediction:
+    def forward(self, x, data_new: Optional = None) -> Prediction:
 
         if data_new == None:
 
-        # self.gp_module.eval()
+            # self.gp_module.eval()
             f = self.gp_module.forward(x, data_new=data_new)
             print("latent {}".format(f.variance))
 
             output = self.gp_module.likelihood(f)
-            print("output {}".format(output ))
+            print("output {}".format(output))
             f_dist = td.Normal(loc=f.mean, scale=torch.sqrt(f.variance))
             print("f_dist {}".format(f_dist))
             y_dist = td.Normal(loc=f.mean, scale=torch.sqrt(output.variance))
@@ -75,11 +75,11 @@ class SVGPDynamicModel(DynamicModel):
             X, Y = data_new
 
             # # make copy of self
-            model = self.gp_module.make_copy()
+            model = self.make_copy()
             inducing_points = self.gp_module.inducing_points
 
             var_cov_root = TriangularLazyTensor(
-            self.variational_strategy._variational_distribution.chol_variational_covar
+                self.variational_strategy._variational_distribution.chol_variational_covar
             )
             var_cov = CholLazyTensor(var_cov_root)
             var_mean = (
@@ -174,43 +174,41 @@ class SVGPDynamicModel(DynamicModel):
         pred = Prediction(latent_dist=f_dist, output_dist=y_dist, noise_var=noise_var)
         return pred
 
-        def make_copy(self):
+    @property
+    def model(self):
+        return self.gp_module.gp
+
+    def make_copy(self):
+        with torch.no_grad():
+            inducing_points = self.model.variational_strategy.base_variational_strategy.inducing_points.detach().clone()
+
+            if hasattr(self, "input_transform"):
+                [p.detach_() for p in self.input_transform.buffers()]
+
+            #new_covar_module = deepcopy(self.gp_module.covar_module)
+
+            new_model = self.__class__(
+                likelihood=deepcopy(self.gp_module.likelihood),
+                mean_module=deepcopy(self.model.mean_module),
+                covar_module=deepcopy(self.model.covar_module),
+                learning_rate=deepcopy(self.gp_module.learning_rate),
+            )
+            #             new_model.mean_module = deepcopy(self.mean_module)
+            #             new_model.likelihood = deepcopy(self.likelihood)
+
+            var_dist = self.model.variational_strategy.base_variational_strategy.variational_distribution
+            mean = var_dist.mean.detach().clone()
+            cov = var_dist.covariance_matrix.detach().clone()
+
+            new_var_dist = new_model.model.variational_strategy.base_variational_strategy.variational_distribution
             with torch.no_grad():
-                inducing_points = self.variational_strategy.inducing_points.detach().clone()
+                new_var_dist.mean.set_(mean)
+                new_var_dist.covariance_matrix.set_(cov)
+                new_model.model.variational_strategy.base_variational_strategy.inducing_points.set_(inducing_points)
 
-                if hasattr(self, "input_transform"):
-                    [p.detach_() for p in self.input_transform.buffers()]
+            new_model.model.variational_strategy.base_variational_strategy.variational_params_initialized.fill_(1)
 
-                new_covar_module = deepcopy(self.covar_module)
-
-                new_model = self.__class__(
-                    init_points=inducing_points,
-                    likelihood=deepcopy(self.likelihood),
-                    use_piv_chol_init=False,
-                    mean_module=deepcopy(self.mean_module),
-                    covar_module=deepcopy(self.covar_module),
-                    input_transform=deepcopy(self.input_transform)
-                    if hasattr(self, "input_transform")
-                    else None,
-                    outcome_transform=deepcopy(self.outcome_transform)
-                    if hasattr(self, "outcome_transform")
-                    else None,
-                )
-                #             new_model.mean_module = deepcopy(self.mean_module)
-                #             new_model.likelihood = deepcopy(self.likelihood)
-
-                var_dist = self.variational_strategy._variational_distribution
-                mean = var_dist.variational_mean.detach().clone()
-                cov_root = var_dist.chol_variational_covar.detach().clone()
-
-                new_var_dist = new_model.variational_strategy._variational_distribution
-                with torch.no_grad():
-                    new_var_dist.variational_mean.set_(mean)
-                    new_var_dist.chol_variational_covar.set_(cov_root)
-
-                new_model.variational_strategy.variational_params_initialized.fill_(1)
-
-            return new_model
+        return new_model
 
     # def train(self, replay_buffer: ReplayBuffer):
     #     dataset = ReplayBuffer_to_dynamics_TensorDataset(
@@ -283,15 +281,16 @@ def conditional_from_precision_sites_white_full(
     cov = Kuu.matmul(R.inv_matmul(Kuu.evaluate()))  # TODO: symmetrise?
     return mean, cov
 
+
 class SVGPModule(pl.LightningModule):
     def __init__(
-        self,
-        likelihood: gpytorch.likelihoods.Likelihood = None,
-        mean_module: gpytorch.means.Mean = None,
-        covar_module: gpytorch.kernels.Kernel = None,
-        num_inducing: int = 16,
-        out_size: int = 1,
-        learning_rate: float = 1e-3,
+            self,
+            likelihood: gpytorch.likelihoods.Likelihood = None,
+            mean_module: gpytorch.means.Mean = None,
+            covar_module: gpytorch.kernels.Kernel = None,
+            num_inducing: int = 16,
+            out_size: int = 1,
+            learning_rate: float = 1e-3,
     ):
         super(SVGPModule, self).__init__()
         self.learning_rate = learning_rate
@@ -310,7 +309,6 @@ class SVGPModule(pl.LightningModule):
                 gpytorch.kernels.RBFKernel(batch_shape=torch.Size([out_size])),
                 batch_shape=torch.Size([out_size]),
             )
-
 
         class IndependentMultitaskGPModel(gpytorch.models.ApproximateGP):
             def __init__(self):
@@ -340,7 +338,7 @@ class SVGPModule(pl.LightningModule):
                 self.mean_module = mean_module
                 self.covar_module = covar_module
 
-            def forward(self, x, data_new: Optional=None):
+            def forward(self, x, data_new: Optional = None):
                 if data_new is None:
                     mean_x = self.mean_module(x)
                     covar_x = self.covar_module(x)
@@ -356,8 +354,8 @@ class SVGPModule(pl.LightningModule):
         self.gp = IndependentMultitaskGPModel()
         self.likelihood = likelihood
 
-    def forward(self, x, data_new: Optional=None):
-    # def forward(self, x):
+    def forward(self, x, data_new: Optional = None):
+        # def forward(self, x):
         return self.gp.forward(x, data_new=data_new)
 
     def training_step(self, batch, batch_idx):
