@@ -45,7 +45,7 @@ if __name__ == "__main__":
         prediction = model.forward(x=Xtest)
         print("Predict WITHOUT fast update: {}".format(prediction.latent_dist))
 
-        # Predict WITH fast update
+        # # Predict WITH fast update
         prediction_with_fast_update = model.forward(x=Xtest, data_new=(Xnew, Ynew))
         print("Predict WITH fast update: {}".format(prediction_with_fast_update.latent_dist))
 

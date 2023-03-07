@@ -13,6 +13,7 @@ from src.custom_types import (
     ReplayBuffer_to_dynamics_TensorDataset,
     State,
 )
+from copy import deepcopy
 from gpytorch.distributions import MultivariateNormal
 from gpytorch.lazy import (
     DiagLazyTensor,
@@ -54,124 +55,162 @@ class SVGPDynamicModel(DynamicModel):
         self.num_workers = num_workers
 
     def forward(self, x, data_new: Optional=None) -> Prediction:
-        self.gp_module.eval()
-        latent = self.gp_module.forward(x, data_new=data_new)
-        print("latent {}".format(latent.variance))
 
-        output = self.gp_module.likelihood(latent)
-        print("output {}".format(output ))
-        f_dist = td.Normal(loc=latent.mean, scale=torch.sqrt(latent.variance))
-        print("f_dist {}".format(f_dist))
-        y_dist = td.Normal(loc=latent.mean, scale=torch.sqrt(output.variance))
-        print("y_dist {}".format(y_dist))
-        noise_var = output.variance - latent.variance
+        if data_new == None:
+
+        # self.gp_module.eval()
+            f = self.gp_module.forward(x, data_new=data_new)
+            print("latent {}".format(f.variance))
+
+            output = self.gp_module.likelihood(f)
+            print("output {}".format(output ))
+            f_dist = td.Normal(loc=f.mean, scale=torch.sqrt(f.variance))
+            print("f_dist {}".format(f_dist))
+            y_dist = td.Normal(loc=f.mean, scale=torch.sqrt(output.variance))
+            print("y_dist {}".format(y_dist))
+            noise_var = output.variance - f.variance
         # pred = Prediction(latent=f_dist, output=y_dist, noise_var=noise_var)
-        X = inputs
-        Y = targets
 
-        # make copy of self
-        fantasy_model = self.make_copy()
-        inducing_points = self.variational_strategy.inducing_points
+        else:
+            X, Y = data_new
 
-        # mean and cov from prediction strategy
-        #         var_dist = self.variational_strategy._variational_distribution
-        #         var_mean = var_dist.variational_mean.detach()
-        #         var_cov_root = var_dist.chol_variational_covar.detach()
-        var_cov_root = TriangularLazyTensor(
+            # # make copy of self
+            model = self.gp_module.make_copy()
+            inducing_points = self.gp_module.inducing_points
+
+            var_cov_root = TriangularLazyTensor(
             self.variational_strategy._variational_distribution.chol_variational_covar
-        )
-        var_cov = CholLazyTensor(var_cov_root)
-        var_mean = (
-            self.variational_strategy.variational_distribution.mean
-        )  # .unsqueeze(-1)
-        if var_mean.shape[-1] != 1:  # TODO: won't work for M=1 ...
-            var_mean = var_mean.unsqueeze(-1)
-
-        # var_dist = self.variational_strategy.variational_distribution
-        # var_mean = var_dist.mean
-        # var_cov = var_dist.lazy_covariance_matrix
-
-        # GPyTorch's way of computing Kuf:
-        # full_inputs = torch.cat([inducing_points, X], dim=-2)
-        full_inputs = torch.cat([torch.tile(inducing_points, X.shape[:-2] + (1, 1)), X], dim=-2)
-        full_covar = self.covar_module(full_inputs)
-
-        # Covariance terms
-        num_induc = inducing_points.size(-2)
-        induc_induc_covar = full_covar[..., :num_induc, :num_induc].add_jitter()
-        induc_data_covar = full_covar[..., :num_induc, num_induc:].evaluate()
-
-        K_uf = induc_data_covar
-
-        # Kuu = self.covar_module(inducing_points)
-        Kuu = induc_induc_covar
-        # Kuu_root = Kuu.cholesky()
-
-        lambda_1, lambda_2 = mean_cov_to_natural_param(var_mean, var_cov, Kuu)
-
-        lambda_1_t = torch.zeros_like(lambda_1)
-        lambda_2_t = torch.zeros_like(lambda_2)
-
-        # online_update
-        for _ in range(self.num_online_updates):
-            # grad_varexp_natural_params
-            with torch.no_grad():
-                Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
-                #                 if Y.shape[-1] == 1:
-                #                     Xt.unsqueeze_(-1)
-                pred = fantasy_model(Xt)
-                mean = pred.mean
-                var = pred.variance
-            mean.requires_grad_()
-            var.requires_grad_()
-
-            # variational expectations
-            f_dist = MultivariateNormal(mean, DiagLazyTensor(var))
-            ve_terms = fantasy_model.likelihood.expected_log_prob(Y, f_dist)
-            ve = ve_terms.sum()  # TODO: CHECK: divide by num_data ? but only one point at a time so probably fine
-
-            ve.backward(inputs=[mean, var])
-            d_exp_dm = mean.grad  # [batch, N]
-            d_exp_dv = var.grad  # [batch, N]
-
-            eps = 1e-8
-            d_exp_dv.clamp_(max=-eps)
-
-            grad_nat_1 = (d_exp_dm - 2.0 * (d_exp_dv * mean))
-            grad_nat_2 = d_exp_dv
-
-            grad_mu_1 = K_uf.matmul(grad_nat_1[..., None])
-
-            grad_mu_2 = K_uf.matmul(DiagLazyTensor(grad_nat_2).matmul(K_uf.swapdims(-1, -2)))
-
-            lr = self.lr
-            scale = 1.0
-
-            lambda_1_t_new = (1.0 - lr) * lambda_1_t + lr * scale * grad_mu_1
-            lambda_2_t_new = (1.0 - lr) * lambda_2_t + lr * scale * (-2) * grad_mu_2
-
-            lambda_1_new = lambda_1 - lambda_1_t + lambda_1_t_new
-            lambda_2_new = lambda_2 - lambda_2_t + lambda_2_t_new
-
-            new_mean, new_cov = conditional_from_precision_sites_white_full(
-                Kuu, lambda_1_new, lambda_2_new,
-                jitter=getattr(self, "tsvgp_jitter", 0.0)
             )
-            new_mean = new_mean.squeeze(-1)
-            new_cov_root = new_cov.cholesky()
+            var_cov = CholLazyTensor(var_cov_root)
+            var_mean = (
+                self.variational_strategy.variational_distribution.mean
+            )  # .unsqueeze(-1)
+            if var_mean.shape[-1] != 1:  # TODO: won't work for M=1 ...
+                var_mean = var_mean.unsqueeze(-1)
 
-            fantasy_var_dist = fantasy_model.variational_strategy._variational_distribution
-            with torch.no_grad():
-                fantasy_var_dist.variational_mean.set_(new_mean)
-                fantasy_var_dist.chol_variational_covar.set_(new_cov_root)
+            # var_dist = self.variational_strategy.variational_distribution
+            # var_mean = var_dist.mean
+            # var_cov = var_dist.lazy_covariance_matrix
 
-            lambda_1 = lambda_1_new
-            lambda_2 = lambda_2_new
-            lambda_1_t = lambda_1_t_new
-            lambda_2_t = lambda_2_t_new
+            # GPyTorch's way of computing Kuf:
+            # full_inputs = torch.cat([inducing_points, X], dim=-2)
+            full_inputs = torch.cat([torch.tile(inducing_points, X.shape[:-2] + (1, 1)), X], dim=-2)
+            full_covar = self.covar_module(full_inputs)
 
+            # Covariance terms
+            num_induc = inducing_points.size(-2)
+            induc_induc_covar = full_covar[..., :num_induc, :num_induc].add_jitter()
+            induc_data_covar = full_covar[..., :num_induc, num_induc:].evaluate()
+
+            K_uf = induc_data_covar
+
+            # Kuu = self.covar_module(inducing_points)
+            Kuu = induc_induc_covar
+            # Kuu_root = Kuu.cholesky()
+
+            lambda_1, lambda_2 = mean_cov_to_natural_param(var_mean, var_cov, Kuu)
+
+            lambda_1_t = torch.zeros_like(lambda_1)
+        # lambda_2_t = torch.zeros_like(lambda_2)
+        #
+        # # online_update
+        # for _ in range(self.num_online_updates):
+        #     # grad_varexp_natural_params
+        #     with torch.no_grad():
+        #         Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
+        #         #                 if Y.shape[-1] == 1:
+        #         #                     Xt.unsqueeze_(-1)
+        #         pred = fantasy_model(Xt)
+        #         mean = pred.mean
+        #         var = pred.variance
+        #     mean.requires_grad_()
+        #     var.requires_grad_()
+        #
+        #     # variational expectations
+        #     f_dist = MultivariateNormal(mean, DiagLazyTensor(var))
+        #     ve_terms = fantasy_model.likelihood.expected_log_prob(Y, f_dist)
+        #     ve = ve_terms.sum()  # TODO: CHECK: divide by num_data ? but only one point at a time so probably fine
+        #
+        #     ve.backward(inputs=[mean, var])
+        #     d_exp_dm = mean.grad  # [batch, N]
+        #     d_exp_dv = var.grad  # [batch, N]
+        #
+        #     eps = 1e-8
+        #     d_exp_dv.clamp_(max=-eps)
+        #
+        #     grad_nat_1 = (d_exp_dm - 2.0 * (d_exp_dv * mean))
+        #     grad_nat_2 = d_exp_dv
+        #
+        #     grad_mu_1 = K_uf.matmul(grad_nat_1[..., None])
+        #
+        #     grad_mu_2 = K_uf.matmul(DiagLazyTensor(grad_nat_2).matmul(K_uf.swapdims(-1, -2)))
+        #
+        #     lr = self.lr
+        #     scale = 1.0
+        #
+        #     lambda_1_t_new = (1.0 - lr) * lambda_1_t + lr * scale * grad_mu_1
+        #     lambda_2_t_new = (1.0 - lr) * lambda_2_t + lr * scale * (-2) * grad_mu_2
+        #
+        #     lambda_1_new = lambda_1 - lambda_1_t + lambda_1_t_new
+        #     lambda_2_new = lambda_2 - lambda_2_t + lambda_2_t_new
+        #
+        #     new_mean, new_cov = conditional_from_precision_sites_white_full(
+        #         Kuu, lambda_1_new, lambda_2_new,
+        #         jitter=getattr(self, "tsvgp_jitter", 0.0)
+        #     )
+        #     new_mean = new_mean.squeeze(-1)
+        #     new_cov_root = new_cov.cholesky()
+        #
+        #     fantasy_var_dist = fantasy_model.variational_strategy._variational_distribution
+        #     with torch.no_grad():
+        #         fantasy_var_dist.variational_mean.set_(new_mean)
+        #         fantasy_var_dist.chol_variational_covar.set_(new_cov_root)
+        #
+        #     lambda_1 = lambda_1_new
+        #     lambda_2 = lambda_2_new
+        #     lambda_1_t = lambda_1_t_new
+        #     lambda_2_t = lambda_2_t_new
+        #
         pred = Prediction(latent_dist=f_dist, output_dist=y_dist, noise_var=noise_var)
         return pred
+
+        def make_copy(self):
+            with torch.no_grad():
+                inducing_points = self.variational_strategy.inducing_points.detach().clone()
+
+                if hasattr(self, "input_transform"):
+                    [p.detach_() for p in self.input_transform.buffers()]
+
+                new_covar_module = deepcopy(self.covar_module)
+
+                new_model = self.__class__(
+                    init_points=inducing_points,
+                    likelihood=deepcopy(self.likelihood),
+                    use_piv_chol_init=False,
+                    mean_module=deepcopy(self.mean_module),
+                    covar_module=deepcopy(self.covar_module),
+                    input_transform=deepcopy(self.input_transform)
+                    if hasattr(self, "input_transform")
+                    else None,
+                    outcome_transform=deepcopy(self.outcome_transform)
+                    if hasattr(self, "outcome_transform")
+                    else None,
+                )
+                #             new_model.mean_module = deepcopy(self.mean_module)
+                #             new_model.likelihood = deepcopy(self.likelihood)
+
+                var_dist = self.variational_strategy._variational_distribution
+                mean = var_dist.variational_mean.detach().clone()
+                cov_root = var_dist.chol_variational_covar.detach().clone()
+
+                new_var_dist = new_model.variational_strategy._variational_distribution
+                with torch.no_grad():
+                    new_var_dist.variational_mean.set_(mean)
+                    new_var_dist.chol_variational_covar.set_(cov_root)
+
+                new_model.variational_strategy.variational_params_initialized.fill_(1)
+
+            return new_model
 
     # def train(self, replay_buffer: ReplayBuffer):
     #     dataset = ReplayBuffer_to_dynamics_TensorDataset(
