@@ -56,46 +56,23 @@ class SVGPDynamicModel(DynamicModel):
 
     def forward(self, x, data_new: Optional = None) -> Prediction:
 
-        if data_new == None:
+        if data_new != None:
 
-            # self.gp_module.eval()
-            f = self.gp_module.forward(x, data_new=data_new)
-            print("latent {}".format(f.variance))
-
-            output = self.gp_module.likelihood(f)
-            print("output {}".format(output))
-            f_dist = td.Normal(loc=f.mean, scale=torch.sqrt(f.variance))
-            print("f_dist {}".format(f_dist))
-            y_dist = td.Normal(loc=f.mean, scale=torch.sqrt(output.variance))
-            print("y_dist {}".format(y_dist))
-            noise_var = output.variance - f.variance
-        # pred = Prediction(latent=f_dist, output=y_dist, noise_var=noise_var)
-
-        else:
             X, Y = data_new
 
             # # make copy of self
             model = self.make_copy()
-            inducing_points = self.gp_module.inducing_points
+            var_strat = self.model.variational_strategy.base_variational_strategy
+            inducing_points = var_strat.inducing_points
 
-            var_cov_root = TriangularLazyTensor(
-                self.variational_strategy._variational_distribution.chol_variational_covar
-            )
-            var_cov = CholLazyTensor(var_cov_root)
-            var_mean = (
-                self.variational_strategy.variational_distribution.mean
-            )  # .unsqueeze(-1)
-            if var_mean.shape[-1] != 1:  # TODO: won't work for M=1 ...
-                var_mean = var_mean.unsqueeze(-1)
-
-            # var_dist = self.variational_strategy.variational_distribution
-            # var_mean = var_dist.mean
-            # var_cov = var_dist.lazy_covariance_matrix
+            var_dist = var_strat.variational_distribution
+            var_mean = var_dist.mean
+            var_cov = var_dist.lazy_covariance_matrix
 
             # GPyTorch's way of computing Kuf:
             # full_inputs = torch.cat([inducing_points, X], dim=-2)
-            full_inputs = torch.cat([torch.tile(inducing_points, X.shape[:-2] + (1, 1)), X], dim=-2)
-            full_covar = self.covar_module(full_inputs)
+            full_inputs = torch.cat([torch.squeeze(inducing_points).T, X], dim=-2)
+            full_covar = self.model.covar_module(full_inputs)
 
             # Covariance terms
             num_induc = inducing_points.size(-2)
@@ -111,66 +88,82 @@ class SVGPDynamicModel(DynamicModel):
             lambda_1, lambda_2 = mean_cov_to_natural_param(var_mean, var_cov, Kuu)
 
             lambda_1_t = torch.zeros_like(lambda_1)
-        # lambda_2_t = torch.zeros_like(lambda_2)
+            lambda_2_t = torch.zeros_like(lambda_2)
         #
-        # # online_update
-        # for _ in range(self.num_online_updates):
-        #     # grad_varexp_natural_params
-        #     with torch.no_grad():
-        #         Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
-        #         #                 if Y.shape[-1] == 1:
-        #         #                     Xt.unsqueeze_(-1)
-        #         pred = fantasy_model(Xt)
-        #         mean = pred.mean
-        #         var = pred.variance
-        #     mean.requires_grad_()
-        #     var.requires_grad_()
-        #
-        #     # variational expectations
-        #     f_dist = MultivariateNormal(mean, DiagLazyTensor(var))
-        #     ve_terms = fantasy_model.likelihood.expected_log_prob(Y, f_dist)
-        #     ve = ve_terms.sum()  # TODO: CHECK: divide by num_data ? but only one point at a time so probably fine
-        #
-        #     ve.backward(inputs=[mean, var])
-        #     d_exp_dm = mean.grad  # [batch, N]
-        #     d_exp_dv = var.grad  # [batch, N]
-        #
-        #     eps = 1e-8
-        #     d_exp_dv.clamp_(max=-eps)
-        #
-        #     grad_nat_1 = (d_exp_dm - 2.0 * (d_exp_dv * mean))
-        #     grad_nat_2 = d_exp_dv
-        #
-        #     grad_mu_1 = K_uf.matmul(grad_nat_1[..., None])
-        #
-        #     grad_mu_2 = K_uf.matmul(DiagLazyTensor(grad_nat_2).matmul(K_uf.swapdims(-1, -2)))
-        #
-        #     lr = self.lr
-        #     scale = 1.0
-        #
-        #     lambda_1_t_new = (1.0 - lr) * lambda_1_t + lr * scale * grad_mu_1
-        #     lambda_2_t_new = (1.0 - lr) * lambda_2_t + lr * scale * (-2) * grad_mu_2
-        #
-        #     lambda_1_new = lambda_1 - lambda_1_t + lambda_1_t_new
-        #     lambda_2_new = lambda_2 - lambda_2_t + lambda_2_t_new
-        #
-        #     new_mean, new_cov = conditional_from_precision_sites_white_full(
-        #         Kuu, lambda_1_new, lambda_2_new,
-        #         jitter=getattr(self, "tsvgp_jitter", 0.0)
-        #     )
-        #     new_mean = new_mean.squeeze(-1)
-        #     new_cov_root = new_cov.cholesky()
-        #
-        #     fantasy_var_dist = fantasy_model.variational_strategy._variational_distribution
-        #     with torch.no_grad():
-        #         fantasy_var_dist.variational_mean.set_(new_mean)
-        #         fantasy_var_dist.chol_variational_covar.set_(new_cov_root)
-        #
-        #     lambda_1 = lambda_1_new
-        #     lambda_2 = lambda_2_new
-        #     lambda_1_t = lambda_1_t_new
-        #     lambda_2_t = lambda_2_t_new
-        #
+            # online_update
+            for _ in range(3): #TODO: make parameter
+                # grad_varexp_natural_params
+                with torch.no_grad():
+                    #Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
+                    #                 if Y.shape[-1] == 1:
+                    #                     Xt.unsqueeze_(-1)
+                    pred = model.forward(X)
+                    mean = pred.latent_dist.mean
+                    var = pred.latent_dist.variance
+                mean.requires_grad_()
+                var.requires_grad_()
+
+                # variational expectations
+                f_dist_b = MultivariateNormal(mean.T, torch.diag_embed(var.T)) # Mean: B x N Cov: B x N x N
+                f_dist = gpytorch.distributions.MultitaskMultivariateNormal.from_batch_mvn(f_dist_b)
+                # f_dist = MultivariateNormal(mean, DiagLazyTensor(var))
+                # f_dist = gpytorch.distributions.MultitaskMultivariateNormal(mean, var)'
+                ve_terms = self.gp_module.likelihood.expected_log_prob(Y, f_dist) # TODO: Is this right?
+                ve = ve_terms.sum()  # TODO: CHECK: divide by num_data ? but only one point at a time so probably fine
+
+                ve.backward(inputs=[mean, var])
+                d_exp_dm = mean.grad  # [batch, N]
+                d_exp_dv = var.grad  # [batch, N]
+
+                eps = 1e-8
+                d_exp_dv.clamp_(max=-eps)
+
+                grad_nat_1 = (d_exp_dm - 2.0 * (d_exp_dv * mean))
+                grad_nat_2 = d_exp_dv
+
+                grad_mu_1 = torch.einsum('bmc, cb -> bm', K_uf, grad_nat_1)
+
+                grad_mu_2 = torch.einsum('bmc, cb, bnc -> bmn', K_uf, grad_nat_2, K_uf)
+
+                lr = 0.8  #TODO: set as a parameter
+                scale = 1.0
+
+                lambda_1_t_new = (1.0 - lr) * lambda_1_t + lr * scale * grad_mu_1[..., None]
+                lambda_2_t_new = (1.0 - lr) * lambda_2_t + lr * scale * (-2) * grad_mu_2
+
+                lambda_1_new = lambda_1 - lambda_1_t + lambda_1_t_new
+                lambda_2_new = lambda_2 - lambda_2_t + lambda_2_t_new
+
+                new_mean, new_cov = conditional_from_precision_sites_white_full(
+                    Kuu, lambda_1_new, lambda_2_new,
+                    jitter=getattr(self, "tsvgp_jitter", 0.0)
+                )
+                new_mean = new_mean.squeeze(-1)
+                new_cov_root = new_cov.cholesky()
+
+                #fantasy_var_dist = fantasy_model.variational_strategy._variational_distribution
+                with torch.no_grad():
+                    var_dist = self.model.variational_strategy.base_variational_strategy.variational_distribution
+                    var_dist.mean.set_(new_mean)
+                    var_dist.covariance_matrix.set_(new_cov)
+
+                lambda_1 = lambda_1_new
+                lambda_2 = lambda_2_new
+                lambda_1_t = lambda_1_t_new
+                lambda_2_t = lambda_2_t_new
+
+        # self.gp_module.eval()
+        f = self.gp_module.forward(x)
+        print("latent {}".format(f.variance))
+
+        output = self.gp_module.likelihood(f)
+        print("output {}".format(output))
+        f_dist = td.Normal(loc=f.mean, scale=torch.sqrt(f.variance))
+        print("f_dist {}".format(f_dist))
+        y_dist = td.Normal(loc=f.mean, scale=torch.sqrt(output.variance))
+        print("y_dist {}".format(y_dist))
+        noise_var = output.variance - f.variance
+
         pred = Prediction(latent_dist=f_dist, output_dist=y_dist, noise_var=noise_var)
         return pred
 
@@ -240,6 +233,7 @@ def mean_cov_to_natural_param(mu, Su, K_uu):
     """
     Transforms (m,S) to (λ₁,P) tsvgp_white parameterization
     """
+    mu = torch.unsqueeze(mu, dim=2)
     lamb1 = K_uu.matmul(Su.inv_matmul(mu))
     lamb2 = K_uu.matmul(Su.inv_matmul(K_uu.evaluate())) - K_uu.evaluate()
 
@@ -290,6 +284,7 @@ class SVGPModule(pl.LightningModule):
             covar_module: gpytorch.kernels.Kernel = None,
             num_inducing: int = 16,
             out_size: int = 1,
+            in_dim: int = 5,
             learning_rate: float = 1e-3,
     ):
         super(SVGPModule, self).__init__()
@@ -312,7 +307,7 @@ class SVGPModule(pl.LightningModule):
 
         class IndependentMultitaskGPModel(gpytorch.models.ApproximateGP):
             def __init__(self):
-                inducing_points = torch.rand(out_size, num_inducing, 1)
+                inducing_points = torch.rand(in_dim, num_inducing, 1)
 
                 # Learn a variational distribution for each output dim
                 variational_distribution = (

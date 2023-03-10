@@ -42,8 +42,8 @@ if __name__ == "__main__":
         Xtest = torch.linspace(3, 4, input_dim).reshape(1, input_dim)
 
         # Predict WITHOUT fast update
-        prediction = model.forward(x=Xtest)
-        print("Predict WITHOUT fast update: {}".format(prediction.latent_dist))
+        #prediction = model.forward(x=Xtest)
+        #print("Predict WITHOUT fast update: {}".format(prediction.latent_dist))
 
         # # Predict WITH fast update
         prediction_with_fast_update = model.forward(x=Xtest, data_new=(Xnew, Ynew))
