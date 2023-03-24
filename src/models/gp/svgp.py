@@ -91,7 +91,7 @@ class SVGPDynamicModel(DynamicModel):
             lambda_2_t = torch.zeros_like(lambda_2)
         #
             # online_update
-            for _ in range(3): #TODO: make parameter
+            for _ in range(1): #TODO: make parameter
                 # grad_varexp_natural_params
                 with torch.no_grad():
                     #Xt = torch.tile(X, Y.shape[:-2] + (1, 1, 1))
@@ -154,7 +154,7 @@ class SVGPDynamicModel(DynamicModel):
 
         # self.gp_module.eval()
         f = self.gp_module.forward(x)
-        print("latent {}".format(f.variance))
+        #print("latent {}".format(f.variance))
 
         output = self.gp_module.likelihood(f)
         print("output {}".format(output))
